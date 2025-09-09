@@ -1,11 +1,8 @@
 ﻿fastapi>=0.95
 uvicorn[standard]>=0.21
 requests>=2.31
-sqlalchemy>=2.1
+sqlalchemy>=2.0,<3
 psycopg2-binary>=2.9
-cryptography>=40.0
-pandas>=2.2
-matplotlib>=3.8
-uvloop>=0.17
-python-dotenv>=1.0
-pydantic>=1.10
+cryptography>=41.0
+pandas>=1.5
+matplotlib>=3.7
