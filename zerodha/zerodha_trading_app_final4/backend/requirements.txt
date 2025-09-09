@@ -10,3 +10,5 @@ python-dotenv
 cryptography
 sqlalchemy
 websocket-client
+
+psycopg2-binary==2.9.7
