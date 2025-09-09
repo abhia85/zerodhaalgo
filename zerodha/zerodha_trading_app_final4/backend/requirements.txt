@@ -2,3 +2,5 @@
 cryptography
 fastapi
 uvicorn[standard]
+SQLAlchemy
+python-dotenv
