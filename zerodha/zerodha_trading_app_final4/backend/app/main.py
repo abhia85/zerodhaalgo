@@ -143,3 +143,18 @@ def list_trades(limit: int = 100):
 
 if __name__ == "__main__":
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, log_level="info")
+# serve a minimal root response so GET / doesn't 404
+@app.get("/", include_in_schema=False)
+def root():
+    return {
+        "ok": True,
+        "service": "zerodha-backend",
+        "status": "running",
+        "note": "API endpoints live under /api — e.g. /api/ping"
+    }
+
+# optional small endpoint for favicon requests (reduces noisy 404s)
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    from fastapi.responses import Response
+    return Response(status_code=204)
