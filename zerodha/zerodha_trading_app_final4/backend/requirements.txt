@@ -1,0 +1,12 @@
+
+fastapi
+uvicorn[standard]
+pandas
+numpy
+requests
+pydantic
+yfinance
+python-dotenv
+cryptography
+sqlalchemy
+websocket-client

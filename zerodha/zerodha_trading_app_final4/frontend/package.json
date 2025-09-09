@@ -1,0 +1,17 @@
+{
+  "name": "zerodha-trading-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "18.x",
+    "react-dom": "18.x",
+    "axios": "^1.4.0",
+    "react-chartjs-2": "^5.2.0",
+    "chart.js": "^4.2.1"
+  },
+  "scripts": {
+    "start": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  }
+}
