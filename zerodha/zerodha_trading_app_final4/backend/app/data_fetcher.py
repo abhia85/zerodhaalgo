@@ -1,124 +1,95 @@
 ﻿# data_fetcher.py
-# Minimal robust DataFetcher wrapper so rom app.data_fetcher import DataFetcher works in the container.
-# This file is intentionally defensive: it tries to use methods exposed by your KiteClient if present,
-# and falls back to safe defaults (empty lists) so the server doesn't crash while we iterate.
-
 from typing import List, Dict, Optional
 from datetime import datetime
+from .logger import logger
+
+try:
+    import yfinance as yf
+    HAVE_YFINANCE = True
+except Exception:
+    HAVE_YFINANCE = False
 
 class DataFetcher:
-    """
-    Wrapper around a KiteClient-like object to provide:
-      - get_candles(symbol, interval, from_ts, to_ts) -> list of candle dicts
-      - list_nse_symbols() -> list of symbol strings
-    This implementation tries common method names on the provided kite client and
-    falls back to empty data if not available.
-    """
-
-    def __init__(self, kite_client):
+    def __init__(self, kite_client=None):
         self.kite = kite_client
 
     def list_nse_symbols(self) -> List[str]:
-        # Try possible methods on the kite client to return instruments/symbols
         try:
-            if hasattr(self.kite, "get_instruments"):
-                instruments = self.kite.get_instruments()
-                # instruments may be list of dicts with 'tradingsymbol' or 'symbol'
-                out = []
-                for i in instruments:
-                    if isinstance(i, dict):
-                        if "tradingsymbol" in i:
-                            out.append(i["tradingsymbol"])
-                        elif "symbol" in i:
-                            out.append(i["symbol"])
-                if out:
-                    return out
-            # fallback: try attribute 'instruments' or 'symbols'
-            if hasattr(self.kite, "instruments") and isinstance(self.kite.instruments, list):
-                return [getattr(x, "tradingsymbol", getattr(x, "symbol", str(x))) for x in self.kite.instruments]
-        except Exception:
-            # defensive: don't crash the server on errors from kite client
-            pass
+            if self.kite:
+                if hasattr(self.kite, 'get_instruments'):
+                    ins = self.kite.get_instruments()
+                    out = []
+                    for i in ins:
+                        if isinstance(i, dict):
+                            sym = i.get('tradingsymbol') or i.get('symbol')
+                            if sym: out.append(sym)
+                    if out: return out
+                if hasattr(self.kite, 'instruments') and isinstance(self.kite.instruments, list):
+                    return [getattr(x, 'tradingsymbol', getattr(x, 'symbol', str(x))) for x in self.kite.instruments]
+        except Exception as e:
+            logger.warning('kite list_nse_symbols error: %s', e)
+        return ['NIFTY 50', 'BANKNIFTY', 'RELIANCE.NS', 'TCS.NS', 'INFY.NS']
 
-        # Minimal safe fallback — helpful for UI to render dropdowns during testing.
-        return ["NIFTY 50", "BANKNIFTY", "RELIANCE.NS", "TCS.NS", "INFY.NS"]
+    def _to_candle(self, dt, o, h, l, c, v):
+        return {
+            'timestamp': dt.isoformat() if isinstance(dt, datetime) else str(dt),
+            'open': float(o),
+            'high': float(h),
+            'low': float(l),
+            'close': float(c),
+            'volume': int(v or 0)
+        }
 
-    def _parse_candle(self, raw) -> Optional[Dict]:
-        """
-        Accept a raw candle payload and convert to a canonical dict:
-        { "timestamp": <iso>, "open": float, "high": float, "low": float, "close": float, "volume": int }
-        """
+    def _try_parse_raw_dict(self, raw):
         try:
-            # Common Kite-like format: [timestamp_ms, open, high, low, close, volume]
-            if isinstance(raw, (list, tuple)) and len(raw) >= 6:
-                ts = raw[0]
-                # Kite sometimes returns timestamp as ms int or as string ISO
-                if isinstance(ts, (int, float)):
-                    # assume ms
-                    ts_iso = datetime.utcfromtimestamp(ts/1000.0).isoformat()
-                else:
-                    ts_iso = str(ts)
-                return {
-                    "timestamp": ts_iso,
-                    "open": float(raw[1]),
-                    "high": float(raw[2]),
-                    "low": float(raw[3]),
-                    "close": float(raw[4]),
-                    "volume": int(raw[5])
-                }
-            # Common dict format
-            if isinstance(raw, dict):
-                # try many common keys
-                ts = raw.get("timestamp") or raw.get("time") or raw.get("date") or raw.get("datetime")
-                if isinstance(ts, (int, float)):
-                    ts_iso = datetime.utcfromtimestamp(ts/1000.0).isoformat()
-                else:
-                    ts_iso = str(ts) if ts is not None else ""
-                return {
-                    "timestamp": ts_iso,
-                    "open": float(raw.get("open", raw.get("o", 0))),
-                    "high": float(raw.get("high", raw.get("h", 0))),
-                    "low": float(raw.get("low", raw.get("l", 0))),
-                    "close": float(raw.get("close", raw.get("c", 0))),
-                    "volume": int(raw.get("volume", raw.get("v", 0)))
-                }
+            ts = raw.get('timestamp') or raw.get('time') or raw.get('date') or raw.get('datetime')
+            if isinstance(ts, (int, float)):
+                dt = datetime.utcfromtimestamp(ts/1000.0)
+            else:
+                dt = ts
+            return self._to_candle(dt, raw.get('open', 0), raw.get('high', 0), raw.get('low', 0), raw.get('close', 0), raw.get('volume', 0))
         except Exception:
             return None
 
-        return None
-
-    def get_candles(self, symbol: str, interval: str = "5m", from_ts: Optional[str] = None, to_ts: Optional[str] = None) -> List[Dict]:
-        """
-        Return a list of canonical candle dicts.
-        Attempts to call kite client using a few common method names:
-          - get_candles(symbol, interval, from_ts, to_ts)
-          - get_historical(symbol, from_ts, to_ts, interval)
-          - get_ohlc or get_klines
-        If none exist or an error occurs, returns an empty list.
-        """
+    def get_candles(self, symbol: str, interval: str = '5m', from_ts: Optional[str] = None, to_ts: Optional[str] = None) -> List[Dict]:
         try:
-            # several possible kite client method names — try them in order
-            if hasattr(self.kite, "get_candles"):
-                raw = self.kite.get_candles(symbol, interval, from_ts, to_ts)
-            elif hasattr(self.kite, "get_historical"):
-                raw = self.kite.get_historical(symbol, from_ts, to_ts, interval)
-            elif hasattr(self.kite, "get_ohlc"):
-                raw = self.kite.get_ohlc(symbol, interval, from_ts, to_ts)
-            elif hasattr(self.kite, "get_klines"):
-                raw = self.kite.get_klines(symbol, interval, from_ts, to_ts)
-            else:
-                raw = None
+            if self.kite:
+                if hasattr(self.kite, 'get_candles'):
+                    raw = self.kite.get_candles(symbol, interval, from_ts, to_ts)
+                    out = []
+                    for r in raw:
+                        try:
+                            ts = r[0]
+                            if isinstance(ts, (int, float)):
+                                dt = datetime.utcfromtimestamp(ts/1000.0)
+                            else:
+                                dt = ts
+                            out.append(self._to_candle(dt, r[1], r[2], r[3], r[4], r[5]))
+                        except Exception:
+                            continue
+                    return out
+                if hasattr(self.kite, 'get_historical'):
+                    raw = self.kite.get_historical(symbol, from_ts, to_ts, interval)
+                    out = []
+                    for r in raw:
+                        c = self._try_parse_raw_dict(r)
+                        if c: out.append(c)
+                    return out
+        except Exception as e:
+            logger.warning('kite data fetch error: %s', e)
 
-            if raw is None:
-                return []
+        if HAVE_YFINANCE:
+            try:
+                if from_ts and to_ts:
+                    df = yf.download(symbol, start=from_ts, end=to_ts, interval=interval)
+                else:
+                    df = yf.download(symbol, period='7d', interval=interval)
+                out = []
+                for idx, row in df.iterrows():
+                    out.append(self._to_candle(idx.to_pydatetime(), row['Open'], row['High'], row['Low'], row['Close'], row.get('Volume', 0)))
+                return out
+            except Exception as e:
+                logger.warning('yfinance fetch failed: %s', e)
 
-            candles = []
-            # raw could be a list of lists or list of dicts
-            for r in raw:
-                item = self._parse_candle(r)
-                if item:
-                    candles.append(item)
-            return candles
-        except Exception:
-            # don't raise — return empty list so the server stays up
-            return []
+        logger.info('No data source available for %s %s -> returning empty candles', symbol, interval)
+        return []

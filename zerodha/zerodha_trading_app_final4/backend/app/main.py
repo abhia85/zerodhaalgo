@@ -1,14 +1,16 @@
-﻿
-from fastapi import FastAPI, HTTPException
+﻿from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import uvicorn
-from app.kite_client import KiteClient
+from kite_client import KiteClient
 from app.data_fetcher import DataFetcher
 from app.backtester import Backtester
-from app.models_db import init_db, SessionLocal, Strategy
-from app.kite_auth_exchange import router as auth_router
+from models_db import init_db, SessionLocal, Strategy
+from kite_auth_exchange import router as auth_router
+from app.config import PAPER_MODE
+from app.logger import logger
+from app.execution_manager import ExecutionManager
 import json
 
 app = FastAPI()
@@ -20,23 +22,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-init_db()  # ensure DB and tables exist
+# initialize DB
+init_db()
 
 kite = KiteClient()
 fetcher = DataFetcher(kite)
 backtester = Backtester(fetcher)
 
+# initialize execution manager with models_db module
+import models_db as models_db_module
+exec_mgr = ExecutionManager(kite, SessionLocal, models_db_module)
+
 app.include_router(auth_router, prefix="/api")
 
 @app.get("/api/auth/login_url")
 def auth_login_url():
-    """Return a Kite login URL to start the Connect flow (frontend can open this)."""
     try:
         url = kite.get_login_url()
         return {"login_url": url}
     except Exception as e:
         return {"error": "unable_to_generate_login_url", "detail": str(e)}
-
 
 @app.get("/api/ping")
 def ping():
@@ -97,26 +102,27 @@ class StartLiveRequest(BaseModel):
 def start_live(req: StartLiveRequest):
     if not kite.is_authenticated():
         raise HTTPException(status_code=401, detail="Zerodha not authenticated")
-    # validate strategy exists
     session = SessionLocal()
     strat = session.query(Strategy).filter(Strategy.id==req.strategy_id).first()
     session.close()
     if not strat:
         raise HTTPException(status_code=404, detail="strategy not found")
-    kite.start_live_run(req)
-    return {"ok": True, "status": "started"}
+    ok, status = exec_mgr.start_live(req.dict())
+    if not ok:
+        raise HTTPException(status_code=400, detail=status)
+    return {"ok": True, "status": status}
 
 @app.post("/api/live/stop")
 def stop_live():
-    kite.stop_live_run()
-    return {"ok": True, "status": "stopped"}
-
+    ok, status = exec_mgr.stop_live()
+    if not ok:
+        raise HTTPException(status_code=400, detail=status)
+    return {"ok": True, "status": status}
 
 @app.get("/api/trades")
 def list_trades(limit: int = 100):
-    """List recent trades from trade journal (for UI/testing)."""
     session = SessionLocal()
-    from app.models_db import TradeJournal
+    from models_db import TradeJournal
     items = session.query(TradeJournal).order_by(TradeJournal.created_at.desc()).limit(limit).all()
     out = []
     for it in items:
@@ -136,4 +142,4 @@ def list_trades(limit: int = 100):
     return out
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, log_level="info")
