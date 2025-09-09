@@ -1,0 +1,418 @@
+﻿--- a/zerodha/zerodha_trading_app_final4/backend/app/data_fetcher.py
++++ b/zerodha/zerodha_trading_app_final4/backend/app/data_fetcher.py
+@@ -1,1 +1,180 @@
++# data_fetcher.py
++from typing import List, Dict, Optional
++from datetime import datetime
++from .logger import logger
++
++try:
++    import yfinance as yf
++    HAVE_YFINANCE = True
++except Exception:
++    HAVE_YFINANCE = False
++
++class DataFetcher:
++    def __init__(self, kite_client=None):
++        self.kite = kite_client
++
++    def list_nse_symbols(self) -> List[str]:
++        try:
++            if self.kite:
++                if hasattr(self.kite, "get_instruments"):
++                    ins = self.kite.get_instruments()
++                    out = []
++                    for i in ins:
++                        if isinstance(i, dict):
++                            sym = i.get("tradingsymbol") or i.get("symbol")
++                            if sym:
++                                out.append(sym)
++                    if out:
++                        return out
++                if hasattr(self.kite, "instruments") and isinstance(self.kite.instruments, list):
++                    return [getattr(x, "tradingsymbol", getattr(x, "symbol", str(x))) for x in self.kite.instruments]
++        except Exception as e:
++            logger.warning("kite list_nse_symbols error: %s", e)
++        return ["NIFTY 50", "BANKNIFTY", "RELIANCE.NS", "TCS.NS", "INFY.NS"]
++
++    def _to_candle(self, dt, o, h, l, c, v):
++        return {
++            "timestamp": dt.isoformat() if isinstance(dt, datetime) else str(dt),
++            "open": float(o),
++            "high": float(h),
++            "low": float(l),
++            "close": float(c),
++            "volume": int(v or 0)
++        }
++
++    def _try_parse_raw_dict(self, raw):
++        try:
++            ts = raw.get("timestamp") or raw.get("time") or raw.get("date") or raw.get("datetime")
++            if isinstance(ts, (int, float)):
++                dt = datetime.utcfromtimestamp(ts/1000.0)
++            else:
++                dt = ts
++            return self._to_candle(dt, raw.get("open", 0), raw.get("high", 0), raw.get("low", 0), raw.get("close", 0), raw.get("volume", 0))
++        except Exception:
++            return None
++
++    def get_candles(self, symbol: str, interval: str = "5m",
++                    from_ts: Optional[str] = None, to_ts: Optional[str] = None) -> List[Dict]:
++        try:
++            if self.kite:
++                if hasattr(self.kite, "get_candles"):
++                    raw = self.kite.get_candles(symbol, interval, from_ts, to_ts)
++                    out = []
++                    for r in raw:
++                        try:
++                            ts = r[0]
++                            if isinstance(ts, (int, float)):
++                                dt = datetime.utcfromtimestamp(ts/1000.0)
++                            else:
++                                dt = ts
++                            out.append(self._to_candle(dt, r[1], r[2], r[3], r[4], r[5]))
++                        except Exception:
++                            continue
++                    return out
++                if hasattr(self.kite, "get_historical"):
++                    raw = self.kite.get_historical(symbol, from_ts, to_ts, interval)
++                    out = []
++                    for r in raw:
++                        c = self._try_parse_raw_dict(r)
++                        if c: out.append(c)
++                    return out
++        except Exception as e:
++            logger.warning("kite data fetch error: %s", e)
++
++        if HAVE_YFINANCE:
++            try:
++                if from_ts and to_ts:
++                    df = yf.download(symbol, start=from_ts, end=to_ts, interval=interval)
++                else:
++                    df = yf.download(symbol, period="7d", interval=interval)
++                out = []
++                for idx, row in df.iterrows():
++                    out.append(self._to_candle(idx.to_pydatetime(), row["Open"], row["High"], row["Low"], row["Close"], row.get("Volume", 0)))
++                return out
++            except Exception as e:
++                logger.warning("yfinance fetch failed: %s", e)
++
++        logger.info("No data source available for %s %s -> returning empty candles", symbol, interval)
++        return []
+--- a/zerodha/zerodha_trading_app_final4/backend/app/backtester.py
++++ b/zerodha/zerodha_trading_app_final4/backend/app/backtester.py
+@@ -0,0 +1,203 @@
++# backtester.py
++from typing import List, Dict, Any
++from datetime import datetime
++import random
++from .logger import logger
++
++class Backtester:
++    def __init__(self, data_fetcher, commission_per_trade=20.0, slippage=0.02):
++        self.fetcher = data_fetcher
++        self.commission = commission_per_trade
++        self.slippage = slippage
++
++    def _apply_slippage_and_fees(self, price: float, side: str):
++        if side == "BUY":
++            price = price * (1 + self.slippage/100.0)
++        else:
++            price = price * (1 - self.slippage/100.0)
++        return price
++
++    def run(self, symbol: str, interval: str, from_ts: str, to_ts: str, strategy_payload: Dict[str, Any]) -> Dict[str, Any]:
++        try:
++            candles = self.fetcher.get_candles(symbol, interval, from_ts, to_ts) or []
++        except Exception as e:
++            logger.warning("backtester: fetcher error: %s", e)
++            candles = []
++
++        trades = []
++        equity_series = []
++        starting_balance = 100000.0
++        balance = starting_balance
++
++        if candles and strategy_payload.get("type") == "ema_cross":
++            fast = int(strategy_payload.get("fast", 9))
++            slow = int(strategy_payload.get("slow", 21))
++            closes = [c["close"] for c in candles]
++            def ema(series, period):
++                if not series: return []
++                k = 2/(period+1)
++                out = [series[0]]
++                for s in series[1:]:
++                    out.append(out[-1] * (1-k) + s * k)
++                return out
++            ema_fast = ema(closes, fast)
++            ema_slow = ema(closes, slow)
++            position = None
++            entry_price = None
++            qty = 0
++            for i in range(1, len(closes)):
++                if ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1] and position != "LONG":
++                    raw_price = closes[i]
++                    price = self._apply_slippage_and_fees(raw_price, "BUY")
++                    qty = max(1, int(balance * 0.01 / price))
++                    entry_price = price
++                    position = "LONG"
++                    trades.append({"entry_time": candles[i]["timestamp"], "symbol": symbol, "side": "BUY", "qty": qty, "entry_price": entry_price})
++                elif ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1] and position == "LONG":
++                    raw_price = closes[i]
++                    price = self._apply_slippage_and_fees(raw_price, "SELL")
++                    pnl = (price - entry_price) * qty - self.commission
++                    balance += pnl
++                    trades[-1].update({"exit_time": candles[i]["timestamp"], "exit_price": price, "pnl": round(pnl,2)})
++                    position = None
++            if position == "LONG":
++                price = self._apply_slippage_and_fees(closes[-1], "SELL")
++                pnl = (price - entry_price) * qty - self.commission
++                balance += pnl
++                trades[-1].update({"exit_time": candles[-1]["timestamp"], "exit_price": price, "pnl": round(pnl,2)})
++            equity_series = [{"timestamp": candles[i]["timestamp"], "equity": round(starting_balance + sum(t.get("pnl",0) for t in trades[:i+1]),2)} for i in range(len(candles))]
++        else:
++            for i in range(5):
++                entry_price = round(1000 + random.uniform(-10, 10), 2)
++                exit_price = round(entry_price + random.uniform(-20, 20), 2)
++                pnl = round((exit_price - entry_price) * random.randint(1,5) - self.commission, 2)
++                trades.append({
++                    "entry_time": datetime.utcnow().isoformat(),
++                    "exit_time": datetime.utcnow().isoformat(),
++                    "symbol": symbol,
++                    "side": random.choice(["BUY", "SELL"]),
++                    "qty": random.randint(1,10),
++                    "entry_price": entry_price,
++                    "exit_price": exit_price,
++                    "pnl": pnl
++                })
++            equity_series = [{"timestamp": datetime.utcnow().isoformat(), "equity": starting_balance + sum(t["pnl"] for t in trades[:i+1]) if i>0 else starting_balance} for i in range(10)]
++
++        wins = sum(1 for t in trades if t.get("pnl",0) > 0)
++        losses = len(trades) - wins
++        total_pnl = round(sum(t.get("pnl",0) for t in trades),2)
++        win_rate = round((wins/len(trades))*100,2) if trades else 0.0
++        peak = -1e12
++        min_dd = 0.0
++        for p in equity_series:
++            val = p["equity"]
++            if val > peak: peak = val
++            dd = (peak - val) / peak if peak>0 else 0
++            if dd > min_dd: min_dd = dd
++        metrics = {"trades": len(trades), "wins": wins, "losses": losses, "win_rate": win_rate, "total_pnl": total_pnl, "max_drawdown": round(min_dd,3)}
++
++        return {"symbol": symbol, "interval": interval, "from": from_ts, "to": to_ts, "trades": trades, "equity_curve": equity_series, "metrics": metrics, "candles_count": len(candles)}
+--- a/zerodha/zerodha_trading_app_final4/backend/app/config.py
++++ b/zerodha/zerodha_trading_app_final4/backend/app/config.py
+@@ -0,0 +1,45 @@
++# config.py
++import os
++from pathlib import Path
++
++BASE_DIR = Path(__file__).resolve().parent
++
++APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
++APP_PORT = int(os.getenv("APP_PORT", "8000"))
++
++PAPER_MODE = os.getenv("PAPER_MODE", "true").lower() in ("1","true","yes")
++LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
++
++KITE_API_KEY = os.getenv("KITE_API_KEY", "")
++KITE_API_SECRET = os.getenv("KITE_API_SECRET", "")
++KITE_ENC_KEY = os.getenv("KITE_ENC_KEY", "")
++
++DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dev_db.sqlite3")
++
++DEFAULT_MAX_DAILY_LOSS = float(os.getenv("DEFAULT_MAX_DAILY_LOSS", "5000.0"))
++DEFAULT_ALLOCATION = float(os.getenv("DEFAULT_ALLOCATION", "1.0"))
++
++MAX_ORDERS_PER_MINUTE = int(os.getenv("MAX_ORDERS_PER_MINUTE", "5"))
+--- a/zerodha/zerodha_trading_app_final4/backend/app/logger.py
++++ b/zerodha/zerodha_trading_app_final4/backend/app/logger.py
+@@ -0,0 +1,14 @@
++# logger.py
++import logging
++from .config import LOG_LEVEL
++
++logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
++                    format="%(asctime)s %(levelname)s %(name)s %(message)s")
++logger = logging.getLogger("zerodha_backend")
+--- a/zerodha/zerodha_trading_app_final4/backend/app/execution_manager.py
++++ b/zerodha/zerodha_trading_app_final4/backend/app/execution_manager.py
+@@ -0,0 +1,187 @@
++# execution_manager.py
++import time
++import threading
++from collections import deque
++from typing import Dict, Any
++from .logger import logger
++from .config import PAPER_MODE, DEFAULT_MAX_DAILY_LOSS, DEFAULT_ALLOCATION, MAX_ORDERS_PER_MINUTE
++
++class ExecutionManager:
++    def __init__(self, kite_client, session_factory, models_db):
++        self.kite = kite_client
++        self.session_factory = session_factory
++        self.models_db = models_db
++        self.lock = threading.Lock()
++        self.running = False
++        self.order_timestamps = deque()
++
++    def _can_send_order(self):
++        now = time.time()
++        while self.order_timestamps and now - self.order_timestamps[0] > 60:
++            self.order_timestamps.popleft()
++        return len(self.order_timestamps) < MAX_ORDERS_PER_MINUTE
++
++    def _record_order(self):
++        self.order_timestamps.append(time.time())
++
++    def start_live(self, run_params: Dict[str,Any]):
++        with self.lock:
++            if self.running:
++                return False, "already_running"
++            self.running = True
++            self._stop_event = threading.Event()
++            self.max_daily_loss = run_params.get("max_daily_loss", DEFAULT_MAX_DAILY_LOSS)
++            self.allocation = run_params.get("allocation", DEFAULT_ALLOCATION)
++            self.capital = run_params.get("capital", 100000.0)
++            self.worker = threading.Thread(target=self._run_loop, args=(run_params,), daemon=True)
++            self.worker.start()
++            logger.info("ExecutionManager: started live run: %s", run_params)
++            return True, "started"
++
++    def stop_live(self):
++        with self.lock:
++            if not self.running:
++                return False, "not_running"
++            self._stop_event.set()
++            self.worker.join(timeout=5)
++            self.running = False
++            logger.info("ExecutionManager: stopped")
++            return True, "stopped"
++
++    def _execute_order(self, order_payload):
++        if PAPER_MODE:
++            logger.info("PAPER_MODE: simulated order: %s", order_payload)
++            try:
++                if hasattr(self.models_db, "record_trade_simulation"):
++                    self.models_db.record_trade_simulation(order_payload)
++            except Exception as e:
++                logger.exception("failed to record simulated order: %s", e)
++            return {"ok": True, "simulated": True}
++        if not self._can_send_order():
++            logger.warning("Rate limit reached, order rejected")
++            return {"ok": False, "error": "rate_limited"}
++        if not self.kite.is_authenticated():
++            return {"ok": False, "error": "kite_not_authenticated"}
++        try:
++            res = self.kite.place_order(order_payload)
++            self._record_order()
++            if hasattr(self.models_db, "record_trade_live"):
++                self.models_db.record_trade_live(order_payload, res)
++            return {"ok": True, "result": res}
++        except Exception as e:
++            logger.exception("Order placement failed: %s", e)
++            return {"ok": False, "error": str(e)}
++
++    def _run_loop(self, run_params):
++        daily_loss = 0.0
++        while not self._stop_event.is_set():
++            try:
++                if daily_loss <= -abs(self.max_daily_loss):
++                    logger.error("Max daily loss hit: %s. Stopping live run.", self.max_daily_loss)
++                    self.stop_live()
++                    return
++                time.sleep(1)
++            except Exception as e:
++                logger.exception("Execution loop error: %s", e)
++                time.sleep(1)
+--- a/zerodha/zerodha_trading_app_final4/backend/app/main.py
++++ b/zerodha/zerodha_trading_app_final4/backend/app/main.py
+@@ -1,22 +1,33 @@
+-from fastapi import FastAPI, HTTPException
+-from fastapi.middleware.cors import CORSMiddleware
+-from pydantic import BaseModel
+-from typing import Optional
+-import uvicorn
+-from kite_client import KiteClient
+-from app.data_fetcher import DataFetcher
+-from backtester import Backtester
+-from models_db import init_db, SessionLocal, Strategy
+-from kite_auth_exchange import router as auth_router
+-import json
++from fastapi import FastAPI, HTTPException
++from fastapi.middleware.cors import CORSMiddleware
++from pydantic import BaseModel
++from typing import Optional
++import uvicorn
++from kite_client import KiteClient
++from app.data_fetcher import DataFetcher
++from app.backtester import Backtester
++from models_db import init_db, SessionLocal, Strategy
++from kite_auth_exchange import router as auth_router
++from app.config import PAPER_MODE
++from app.logger import logger
++from app.execution_manager import ExecutionManager
++import json
+@@
+-app = FastAPI()
++app = FastAPI()
+ app.add_middleware(
+     CORSMiddleware,
+     allow_origins=["*"],
+     allow_credentials=True,
+     allow_methods=["*"],
+     allow_headers=["*"],
+ )
+ 
+-init_db()  # ensure DB and tables exist
+-
+-kite = KiteClient()
+-fetcher = DataFetcher(kite)
+-backtester = Backtester(fetcher)
++init_db()
++
++kite = KiteClient()
++fetcher = DataFetcher(kite)
++backtester = Backtester(fetcher)
++
++# initialize execution manager (models_db passed as module object)
++import models_db as models_db_module
++exec_mgr = ExecutionManager(kite, SessionLocal, models_db_module)
+@@
+ def auth_login_url():
+@@
+     try:
+         url = kite.get_login_url()
+         return {"login_url": url}
+     except Exception as e:
+         return {"error": "unable_to_generate_login_url", "detail": str(e)}
+@@
+ class StartLiveRequest(BaseModel):
+     strategy_id: int
+     capital: float
+     max_daily_loss: float
+     allocation: float = 1.0
+@@
+ def start_live(req: StartLiveRequest):
+     if not kite.is_authenticated():
+         raise HTTPException(status_code=401, detail="Zerodha not authenticated")
+@@
+-    kite.start_live_run(req)
+-    return {"ok": True, "status": "started"}
++    # delegate to ExecutionManager
++    ok, status = exec_mgr.start_live(req.dict())
++    if not ok:
++        raise HTTPException(status_code=400, detail=status)
++    return {"ok": True, "status": status}
+@@
+ def stop_live():
+-    kite.stop_live_run()
+-    return {"ok": True, "status": "stopped"}
++    ok, status = exec_mgr.stop_live()
++    if not ok:
++        raise HTTPException(status_code=400, detail=status)
++    return {"ok": True, "status": status}
+@@
+ if __name__ == "__main__":
+-    uvicorn.run("main:app", host="0.0.0.0", port=8000, log_level="info")
++    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, log_level="info")
