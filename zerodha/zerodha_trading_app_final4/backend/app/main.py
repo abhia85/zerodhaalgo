@@ -1,11 +1,11 @@
-
+﻿
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import uvicorn
 from kite_client import KiteClient
-from data_fetcher import DataFetcher
+from app.data_fetcher import DataFetcher
 from backtester import Backtester
 from models_db import init_db, SessionLocal, Strategy
 from kite_auth_exchange import router as auth_router
