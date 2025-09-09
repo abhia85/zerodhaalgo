@@ -36,7 +36,7 @@ def auth_exchange(payload: dict):
         if 'data' in data and 'access_token' in data['data']:
             access_token = data['data']['access_token']
             # expires_at may be available in response metadata; store token via KiteClient
-            from kite_client import KiteClient
+            from app.kite_client import KiteClient
             kc = KiteClient()
             kc.set_token(access_token, expires_in_seconds=None)  # expiry handling optional
             return {'ok': True}

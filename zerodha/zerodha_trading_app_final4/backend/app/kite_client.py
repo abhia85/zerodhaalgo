@@ -5,7 +5,7 @@ import time
 import sqlite3
 from typing import Optional
 from cryptography.fernet import Fernet
-from models_db import SessionLocal, TokenStore, TradeJournal, DailyLoss
+from app.models_db import SessionLocal, TokenStore, TradeJournal, DailyLoss
 import requests
 from datetime import datetime, timedelta
 import json
@@ -108,7 +108,7 @@ class KiteClient:
     def start_live_run(self, start_live_request):
         if self.live_worker and self.live_worker.is_alive():
             return
-        from workers import LiveWorker
+        from app.workers import LiveWorker
         self._stop_flag = threading.Event()
         self.live_worker = LiveWorker(self, start_live_request)
         self.live_worker.start()

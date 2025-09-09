@@ -2,7 +2,7 @@
 # Streaming worker: connects to Kite Connect WebSocket if KITE_STREAM_URL and access token present.
 # Otherwise falls back to simulated low-latency polling.
 import threading, time, os, json
-from data_fetcher import DataFetcher
+from app.data_fetcher import DataFetcher
 
 try:
     import websocket

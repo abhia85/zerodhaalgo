@@ -4,11 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import uvicorn
-from kite_client import KiteClient
+from app.kite_client import KiteClient
 from app.data_fetcher import DataFetcher
-from backtester import Backtester
-from models_db import init_db, SessionLocal, Strategy
-from kite_auth_exchange import router as auth_router
+from app.backtester import Backtester
+from app.models_db import init_db, SessionLocal, Strategy
+from app.kite_auth_exchange import router as auth_router
 import json
 
 app = FastAPI()
@@ -116,7 +116,7 @@ def stop_live():
 def list_trades(limit: int = 100):
     """List recent trades from trade journal (for UI/testing)."""
     session = SessionLocal()
-    from models_db import TradeJournal
+    from app.models_db import TradeJournal
     items = session.query(TradeJournal).order_by(TradeJournal.created_at.desc()).limit(limit).all()
     out = []
     for it in items:
