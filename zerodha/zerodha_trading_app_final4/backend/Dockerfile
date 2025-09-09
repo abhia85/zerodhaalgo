@@ -4,6 +4,7 @@ FROM python:3.11-slim
 # Avoid generating .pyc files
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app/app
 
 # Set workdir
 WORKDIR /app
@@ -15,7 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install
-# NOTE: repo has backend inside nested folder; adjust COPY accordingly
 COPY zerodha/zerodha_trading_app_final4/backend/requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip
 RUN pip install -r /app/requirements.txt
