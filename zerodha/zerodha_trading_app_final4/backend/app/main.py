@@ -3,11 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import uvicorn
-from kite_client import KiteClient
+from app.kite_client import KiteClient
 from app.data_fetcher import DataFetcher
 from app.backtester import Backtester
-from models_db import init_db, SessionLocal, Strategy
-from kite_auth_exchange import router as auth_router
+from app.models_db import init_db, SessionLocal, Strategy
+from app.kite_auth_exchange import router as auth_router
 from app.config import PAPER_MODE
 from app.logger import logger
 from app.execution_manager import ExecutionManager
