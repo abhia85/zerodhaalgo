@@ -30,7 +30,7 @@ fetcher = DataFetcher(kite)
 backtester = Backtester(fetcher)
 
 # initialize execution manager with models_db module
-import models_db as models_db_module
+from app import models_db as models_db_module
 exec_mgr = ExecutionManager(kite, SessionLocal, models_db_module)
 
 app.include_router(auth_router, prefix="/api")
